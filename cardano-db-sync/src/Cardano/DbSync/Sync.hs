@@ -46,8 +46,6 @@ import           Cardano.DbSync.Epoch
 import           Cardano.DbSync.Era
 import           Cardano.DbSync.Error
 import           Cardano.DbSync.Metrics
-import           Cardano.DbSync.StateQuery (StateQueryTMVar, getSlotDetails, localStateQueryHandler,
-                   newStateQueryTMVar)
 import           Cardano.DbSync.Tracing.ToObjectOrphans ()
 import           Cardano.DbSync.Types
 import           Cardano.DbSync.Util
@@ -57,7 +55,6 @@ import qualified Codec.CBOR.Term as CBOR
 import           Control.Monad.Trans.Except.Exit (orDie)
 
 import qualified Data.ByteString.Lazy as BSL
-import           Data.Functor.Contravariant (contramap)
 import qualified Data.Text as Text
 
 import           Database.Persist.Sql (SqlBackend)
@@ -70,16 +67,13 @@ import           Ouroboros.Network.Driver.Simple (runPipelinedPeer)
 
 import           Ouroboros.Consensus.Block.Abstract (CodecConfig)
 import           Ouroboros.Consensus.Byron.Node ()
-import           Ouroboros.Consensus.Cardano.Block (CardanoEras)
 import           Ouroboros.Consensus.Cardano.Node ()
 import           Ouroboros.Consensus.Config (configCodec)
-import           Ouroboros.Consensus.HardFork.History.Qry (Interpreter)
 import qualified Ouroboros.Consensus.HardFork.Simple as HardFork
 import           Ouroboros.Consensus.Network.NodeToClient (ClientCodecs, cChainSyncCodec,
                    cStateQueryCodec, cTxSubmissionCodec)
 import           Ouroboros.Consensus.Node.ErrorPolicy (consensusErrorPolicy)
 import qualified Ouroboros.Consensus.Node.ProtocolInfo as Consensus
-import           Ouroboros.Consensus.Shelley.Protocol (StandardCrypto)
 
 import           Ouroboros.Network.Block (BlockNo (..), Point (..), Tip (..), blockNo, genesisPoint,
                    getTipBlockNo)
@@ -87,8 +81,8 @@ import           Ouroboros.Network.Mux (MuxPeer (..), RunMiniProtocol (..))
 import           Ouroboros.Network.NodeToClient (ClientSubscriptionParams (..), ConnectionId,
                    ErrorPolicyTrace (..), Handshake, IOManager, LocalAddress,
                    NetworkSubscriptionTracers (..), NodeToClientProtocols (..), TraceSendRecv,
-                   WithAddr (..), localSnocket, localTxSubmissionPeerNull, networkErrorPolicies,
-                   withIOManager)
+                   WithAddr (..), localSnocket, localStateQueryPeerNull, localTxSubmissionPeerNull,
+                   networkErrorPolicies, withIOManager)
 import qualified Ouroboros.Network.NodeToClient.Version as Network
 
 import           Ouroboros.Network.Protocol.ChainSync.ClientPipelined
@@ -99,7 +93,6 @@ import           Ouroboros.Network.Protocol.ChainSync.ClientPipelined
 import           Ouroboros.Network.Protocol.ChainSync.PipelineDecision (MkPipelineDecision,
                    PipelineDecision (..), pipelineDecisionLowHighMark, runPipelineDecision)
 import           Ouroboros.Network.Protocol.ChainSync.Type (ChainSync)
-import           Ouroboros.Network.Protocol.LocalStateQuery.Client (localStateQueryClientPeer)
 import qualified Ouroboros.Network.Snocket as Snocket
 import           Ouroboros.Network.Subscription (SubscriptionTrace)
 
@@ -155,7 +148,6 @@ runSyncNodeClient
     -> SocketPath
     -> IO ()
 runSyncNodeClient metricsSetters env iomgr trce (SocketPath socketPath) = do
-  queryVar <- newStateQueryTMVar
   logInfo trce $ "localInitiatorNetworkApplication: connecting to node via " <> textShow socketPath
   void $ subscribe
     (localSnocket iomgr)
@@ -163,7 +155,7 @@ runSyncNodeClient metricsSetters env iomgr trce (SocketPath socketPath) = do
     (envNetworkMagic env)
     networkSubscriptionTracers
     clientSubscriptionParams
-    (dbSyncProtocols trce env metricsSetters queryVar)
+    (dbSyncProtocols trce env metricsSetters)
   where
     codecConfig :: CodecConfig CardanoBlock
     codecConfig = configCodec $ Consensus.pInfoConfig (leProtocolInfo $ envLedger env)
@@ -199,11 +191,10 @@ runSyncNodeClient metricsSetters env iomgr trce (SocketPath socketPath) = do
 
 dbSyncProtocols
     :: Trace IO Text -> SyncEnv -> MetricSetters
-    -> StateQueryTMVar CardanoBlock (Interpreter (CardanoEras StandardCrypto))
     -> Network.NodeToClientVersion -> ClientCodecs CardanoBlock IO
     -> ConnectionId LocalAddress
     -> NodeToClientProtocols 'InitiatorMode BSL.ByteString IO () Void
-dbSyncProtocols trce env metricsSetters queryVar version codecs _connectionId =
+dbSyncProtocols trce env metricsSetters version codecs _connectionId =
     NodeToClientProtocols
       { localChainSyncProtocol = localChainSyncPtcl
       , localTxSubmissionProtocol = dummylocalTxSubmit
@@ -237,7 +228,7 @@ dbSyncProtocols trce env metricsSetters queryVar version codecs _connectionId =
                 (cChainSyncCodec codecs)
                 channel
                 (chainSyncClientPeerPipelined
-                    $ chainSyncClient metricsSetters trce env queryVar latestPoints currentTip actionQueue)
+                    $ chainSyncClient metricsSetters trce latestPoints currentTip actionQueue)
             )
 
         atomically $ writeDbActionQueue actionQueue DbFinish
@@ -255,9 +246,9 @@ dbSyncProtocols trce env metricsSetters queryVar version codecs _connectionId =
     localStateQuery :: RunMiniProtocol 'InitiatorMode BSL.ByteString IO () Void
     localStateQuery =
       InitiatorProtocolOnly $ MuxPeer
-        (contramap (Text.pack . show) . toLogObject $ appendName "local-state-query" trce)
+        Logging.nullTracer
         (cStateQueryCodec codecs)
-        (localStateQueryClientPeer (localStateQueryHandler queryVar))
+        localStateQueryPeerNull
 
     versionErrorMsg :: Text
     versionErrorMsg = Text.concat
@@ -312,13 +303,11 @@ getCurrentTipBlockNo = do
 chainSyncClient
     :: MetricSetters
     -> Trace IO Text
-    -> SyncEnv
-    -> StateQueryTMVar CardanoBlock (Interpreter (CardanoEras StandardCrypto))
     -> [Point CardanoBlock]
     -> WithOrigin BlockNo
     -> DbActionQueue
     -> ChainSyncClientPipelined CardanoBlock (Point CardanoBlock) (Tip CardanoBlock) IO ()
-chainSyncClient metricsSetters trce env queryVar latestPoints currentTip actionQueue = do
+chainSyncClient metricsSetters trce latestPoints currentTip actionQueue = do
     ChainSyncClientPipelined $ pure $ clientPipelinedStIdle currentTip latestPoints
   where
     clientPipelinedStIdle
@@ -376,9 +365,8 @@ chainSyncClient metricsSetters trce env queryVar latestPoints currentTip actionQ
 
                 setNodeBlockHeight metricsSetters (getTipBlockNo tip)
 
-                details <- getSlotDetails trce env queryVar (cardanoBlockSlotNo blk)
                 newSize <- atomically $ do
-                                writeDbActionQueue actionQueue $ mkDbApply blk details
+                                writeDbActionQueue actionQueue $ mkDbApply blk
                                 lengthDbActionQueue actionQueue
 
                 setDbQueueLength metricsSetters newSize
