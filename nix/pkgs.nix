@@ -29,6 +29,8 @@ in {
     cardano-db-tool;
   inherit (cardanoDbSyncHaskellPackages.cardano-node.components.exes)
       cardano-node;
+  inherit (cardanoDbSyncHaskellPackages.cardano-smash-server.components.exes)
+    cardano-smash-server;
 
   cabal = haskell-nix.tool compiler "cabal" {
     version = "latest";
