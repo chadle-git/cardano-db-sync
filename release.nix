@@ -84,6 +84,8 @@ let
 
   jobs = {
     inherit dockerImageArtifact;
+    # only build nixos tests on first supported system (linux)
+    inherit (pkgsFor (builtins.head  supportedSystems)) nixosTests;
     cardano-db-sync-linux = import ./nix/binary-release.nix {
       inherit pkgs project;
       platform = "linux";
@@ -109,6 +111,7 @@ let
         jobs.cardano-db-sync-linux
         jobs.cardano-db-sync-macos
         jobs.dockerImageArtifact
+        jobs.nixosTests.basicTest.x86_64-linux
       ]
     ]));
 

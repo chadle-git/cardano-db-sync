@@ -22,7 +22,7 @@ let
       (selectProjectPackages cardanoDbSyncHaskellPackages);
 
   packages = {
-    inherit haskellPackages cardano-db-sync cardano-db-sync-extended cardano-smash-server cardano-node scripts dockerImage;
+    inherit haskellPackages cardano-db-sync cardano-db-sync-extended cardano-smash-server cardano-smash-server-no-basic-auth cardano-node scripts dockerImage;
 
     # so that eval time gc roots are cached (nix-tools stuff)
     inherit (cardanoDbSyncProject) roots plan-nix;
@@ -53,5 +53,10 @@ let
       inherit pkgs;
       withHoogle = true;
     };
+
+  nixosTests = import ./nix/nixos/tests {
+    inherit pkgs;
+  };
+
 };
 in packages

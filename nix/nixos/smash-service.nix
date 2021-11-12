@@ -1,8 +1,9 @@
 { config, lib, pkgs, ... }:
 
 let
+  inherit (lib) types;
   cfg = config.services.smash;
-  inherit (cfg.dbSyncPkgs) cardano-smash-server iohkNix;
+  inherit (cfg.dbSyncPkgs) iohkNix;
   smashConfig = cfg.explorerConfig // {
     inherit (cfg.nodeConfig) ByronGenesisFile ShelleyGenesisFile ByronGenesisHash ShelleyGenesisHash Protocol RequiresNetworkMagic;
   };
@@ -14,11 +15,11 @@ in {
       enable = lib.mkEnableOption "enable the smash server";
       script = lib.mkOption {
         internal = true;
-        type = lib.types.package;
+        type = types.package;
       };
       dbSyncPkgs = lib.mkOption {
-        type = lib.types.attrs;
-        default = import ../. {};
+        type = types.attrs;
+        default = import ../.. {};
         defaultText = "db-sync pkgs";
         description = ''
           The db-sync packages and library that should be used.
@@ -26,53 +27,81 @@ in {
         internal = true;
       };
       package = lib.mkOption {
-        type = lib.types.package;
-        default = cardano-smash-server;
+        type = types.package;
+        default = (cfg.dbSyncPkgs.cardanoDbSyncProject.appendModule {
+          modules = [{packages.cardano-smash-server.flags.disable-basic-auth = cfg.admins == null;}];
+        }).hsPkgs.cardano-smash-server.components.exes.cardano-smash-server;
       };
       port = lib.mkOption {
-        type = lib.types.int;
+        type = types.int;
         default = 3100;
         description = "http serving port";
       };
       explorerConfig = lib.mkOption {
-        type = lib.types.attrs;
+        type = types.attrs;
         default = cfg.environment.explorerConfig;
       };
       nodeConfig = lib.mkOption {
-        type = lib.types.attrs;
+        type = types.attrs;
         default = cfg.environment.nodeConfig;
       };
       environment = lib.mkOption {
-        type = lib.types.nullOr lib.types.attrs;
+        type = types.nullOr types.attrs;
         default = iohkNix.cardanoLib.environments.${cfg.environmentName};
       };
       logConfig = lib.mkOption {
-        type = lib.types.attrs;
+        type = types.attrs;
         default = iohkNix.cardanoLib.defaultExplorerLogConfig;
       };
       environmentName = lib.mkOption {
-        type = lib.types.str;
+        type = types.str;
         description = "environment name";
       };
       socketPath = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
+        type = types.nullOr types.path;
         default = null;
       };
-      user = lib.mkOption {
-        type = lib.types.str;
-        default = "smash";
-        description = "the user to run as";
+      delistedPools = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "List of pool id that should be delisted";
+      };
+      admins = lib.mkOption {
+        type = types.nullOr (types.either types.str types.path);
+        default = null;
+        description = ''File of <username>,<password> (one per line)
+          used to protect secure endpoints (pool delisting and enlisting, ticker reserving, policies fetching)
+          with basic auth'';
       };
       postgres = {
         generatePGPASS = lib.mkOption {
-          type = lib.types.bool;
+          type = types.bool;
           default = true;
           description = "generate pgpass";
         };
         pgpass = lib.mkOption {
-          type = lib.types.path;
-          internal = true;
-          default = config.services.cardano-db-sync.pgpass;
+          type = types.path;
+          default = builtins.toFile "pgpass" "${cfg.postgres.socketdir}:${toString cfg.postgres.port}:${cfg.postgres.database}:${cfg.postgres.user}:*";
+        };
+        socketdir = lib.mkOption {
+          type = types.str;
+          default = "/run/postgresql";
+          description = "the path to the postgresql socket";
+        };
+        port = lib.mkOption {
+          type = types.int;
+          default = 5432;
+          description = "the postgresql port";
+        };
+        database = lib.mkOption {
+          type = types.str;
+          default = "cdbsync";
+          description = "the postgresql database to use";
+        };
+        user = lib.mkOption {
+          type = types.str;
+          default = "cexplorer";
+          description = "the postgresql user to use";
         };
       };
     };
@@ -87,23 +116,38 @@ in {
       ${lib.optionalString cfg.postgres.generatePGPASS ''
       cp ${cfg.postgres.pgpass} /$RUNTIME_DIRECTORY/pgpass
       chmod 0600 $RUNTIME_DIRECTORY/pgpass
-      export SMASHPGPASSFILE=/$RUNTIME_DIRECTORY/pgpass
+      export PGPASSFILE=/$RUNTIME_DIRECTORY/pgpass
       ''}
 
       exec ${cfg.package}/bin/cardano-smash-server \
         --port ${toString cfg.port} \
         --config ${configFile} \
+        ${lib.optionalString (cfg.admins != null)
+        "--admins ${cfg.admins}"}
     '';
-    environment.systemPackages = [ cfg.package config.services.postgresql.package ];
     systemd.services.smash = {
-      path = [ cfg.package pkgs.netcat pkgs.postgresql ];
+      path = [ pkgs.netcat pkgs.curl ];
       preStart = ''
         for x in {1..60}; do
-          nc -z localhost ${toString config.services.cardano-db-sync.postgres.port} && break
+          nc -z localhost ${toString cfg.postgres.port} && break
           echo loop $x: waiting for postgresql 2 sec...
           sleep 2
         done
         sleep 1
+      '';
+      postStart = ''
+        for x in {1..10}; do
+          nc -z localhost ${toString cfg.port} && break
+          echo loop $x: waiting for smash 2 sec...
+          sleep 2
+        done
+        sleep 1
+        for p in ${toString cfg.delistedPools}; do
+          echo "Unlisting pool $p."
+          curl --silent --header "Content-Type: application/json" --request PATCH \
+          --data "{ \"poolId\": \"$p\" }" \
+          "http://localhost:${toString cfg.port}/api/v1/delist"
+        done
       '';
       serviceConfig = {
         ExecStart = config.services.smash.script;
