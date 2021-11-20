@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeApplications #-}
 module Cardano.DbTool.Validate.PoolOwner
   ( validateAllPoolsHaveOwners
   ) where
@@ -9,11 +10,8 @@ import           Cardano.Db
 import           Control.Monad.IO.Class (MonadIO)
 import           Control.Monad.Trans.Reader (ReaderT)
 
-import           Database.Esqueleto.Legacy (Value (..), countRows, from, notExists, select, unValue,
-                   where_, (==.), (^.))
-
-import           Database.Persist.Sql (SqlBackend)
-
+import           Database.Esqueleto.Experimental (SqlBackend, Value (..), countRows, from,
+                   notExists, select, table, unValue, where_, (==.), (^.))
 
 validateAllPoolsHaveOwners :: IO ()
 validateAllPoolsHaveOwners = do
@@ -30,8 +28,10 @@ validateAllPoolsHaveOwners = do
 
 queryPoolsWithoutOwners :: MonadIO m => ReaderT SqlBackend m Int
 queryPoolsWithoutOwners = do
-    res <- select . from $ \ phash -> do
-              where_ . notExists . from $ \ powner -> do
-                where_ (phash ^. PoolHashId ==. powner ^. PoolOwnerPoolHashId)
-              pure countRows
+    res <- select $ do
+      phash <- from $ table @PoolHash
+      where_ . notExists $ do
+        powner <- from (table @PoolOwner)
+        where_ (phash ^. PoolHashId ==. powner ^. PoolOwnerPoolHashId)
+      pure countRows
     pure $ maybe 0 unValue (listToMaybe res)
