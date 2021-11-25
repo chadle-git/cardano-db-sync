@@ -143,6 +143,7 @@ source-repository-package
   --sha256: 0xdfkk79dwm2hznl5iczr8v4c7j3l2vmg220bmvv4nb7wdr6951m
   subdir:
     cardano-api
+    cardano-cli
     cardano-node
 
 source-repository-package
