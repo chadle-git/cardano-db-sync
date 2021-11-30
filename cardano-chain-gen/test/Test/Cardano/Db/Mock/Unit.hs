@@ -32,7 +32,7 @@ unitTests :: IOManager -> [(Text, Text)] -> TestTree
 unitTests iom knownMigrations =
   testGroup "unit tests"
     [ testCase "Forge some blocks" forgeBlocks
-    , testCase "Add one Simple block" (addSimpleTxShelley iom knownMigrations)
+    , testCase "Add one Simple block" (addSimpleRewards iom knownMigrations)
     ]
 
 rootTestDir :: FilePath
@@ -231,3 +231,24 @@ addSimpleTxShelley =
       assertBlockNoBackoff 0
   where
     testDir = rootTestDir </> "temp/addSimpleTxShelley"
+
+addSimpleRewards :: IOManager -> [(Text, Text)] -> IO ()
+addSimpleRewards =
+    withFullConfig configDir testDir $ \interpreter mockServer asyncDBSync -> do
+      -- translate the block to a real Cardano block.
+      tx0 <- withAlonzoLedgerState interpreter $  Alonzo.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10000 10000
+      blk <- forgeNext interpreter $ MockBlock [TxAlonzo tx0] (NodeId 0)
+      atomically $ addBlock mockServer blk
+      -- start db-sync and let it sync
+      _ <- asyncDBSync
+      blks0 <- forM (replicate 500 mockBlock0) (forgeNext interpreter)
+      atomically $ forM_ blks0 $ addBlock mockServer
+      blks1 <- forM (replicate 1000 mockBlock0) (forgeNext interpreter)
+      atomically $ forM_ blks1 $ addBlock mockServer
+      blks2 <- forM (replicate 1500 mockBlock0) (forgeNext interpreter)
+      atomically $ forM_ blks2 $ addBlock mockServer
+      assertBlocksCountDetailed 3000 [1,2,4,8,16,32,64,128,256]
+      assertRewardCount 9
+
+  where
+    testDir = rootTestDir </> "temp/addSimpleRewards"
