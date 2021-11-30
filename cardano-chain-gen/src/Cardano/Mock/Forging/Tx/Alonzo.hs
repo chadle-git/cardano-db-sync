@@ -1,10 +1,11 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Cardano.Mock.Forging.Tx where
+module Cardano.Mock.Forging.Tx.Alonzo where
 
 import           Cardano.Prelude
 
-import qualified Data.Map.Strict as Map
 import qualified Data.Maybe.Strict as Strict
 import           Data.Sequence.Strict (StrictSeq)
 import qualified Data.Sequence.Strict as StrictSeq
@@ -16,18 +17,16 @@ import           Cardano.Ledger.BaseTypes
 import           Cardano.Ledger.Coin
 import           Cardano.Ledger.Era (Crypto)
 import           Cardano.Ledger.Mary.Value
-import           Cardano.Ledger.Shelley.LedgerState hiding (LedgerState)
 import           Cardano.Ledger.Shelley.TxBody (Wdrl (..))
-import           Cardano.Ledger.Shelley.UTxO
 import           Cardano.Ledger.ShelleyMA.Timelocks
 import           Cardano.Ledger.TxIn (TxIn (..))
 
-import           Ouroboros.Consensus.Cardano.Block (CardanoEras, HardForkBlock, LedgerState)
+import           Ouroboros.Consensus.Cardano.Block (LedgerState)
 import           Ouroboros.Consensus.Shelley.Eras (AlonzoEra, StandardCrypto)
 import           Ouroboros.Consensus.Shelley.Ledger (ShelleyBlock)
-import qualified Ouroboros.Consensus.Shelley.Ledger.Ledger as Consensus
 
-type CardanoBlock = HardForkBlock (CardanoEras StandardCrypto)
+import           Cardano.Mock.Forging.Tx.Generic
+import           Cardano.Mock.Forging.Types
 
 consPaymentTx :: Set (TxIn (Crypto (AlonzoEra StandardCrypto)))
               -> StrictSeq (TxOut (AlonzoEra StandardCrypto))
@@ -48,21 +47,19 @@ consPaymentTx ins outs fees =
       Strict.SNothing
       (Strict.SJust Testnet)
 
-mkPaymentTx :: Int -> Int -> Word64 -> Word64
+mkPaymentTx :: UTxOIndex -> UTxOIndex -> Integer -> Integer
             -> LedgerState (ShelleyBlock (AlonzoEra StandardCrypto))
-            -> ValidatedTx (AlonzoEra StandardCrypto)
-mkPaymentTx inputIndex outputIntex amount fee sta =
-    mkSimpleTx $ consPaymentTx input (StrictSeq.fromList [output, change]) (Coin 0)
-  where
-    utxoPairs = Map.toList $ unUTxO $ _utxo $ _utxoState $ esLState $
-        nesEs $ Consensus.shelleyLedgerState sta
-    inputPair = utxoPairs !! inputIndex
-    input = Set.singleton $ fst inputPair
-    outputPair = utxoPairs !! outputIntex
-    TxOut addr _ _ = snd outputPair
-    output = TxOut addr (valueFromList (fromIntegral amount) []) Strict.SNothing
-    TxOut addr' (Value inputValue _) _ = snd inputPair
-    change = TxOut addr' (valueFromList (fromIntegral $ fromIntegral inputValue - amount) []) Strict.SNothing
+            -> Either ForgingError (ValidatedTx (AlonzoEra StandardCrypto))
+mkPaymentTx inputIndex outputIndex amount fees sta = do
+    (inputPair, _) <- resolveUTxOIndex inputIndex sta
+    (outputPair, _ ) <- resolveUTxOIndex outputIndex sta
+
+    let input = Set.singleton $ fst inputPair
+        TxOut addr _ _ = snd outputPair
+        output = TxOut addr (valueFromList (fromIntegral amount) []) Strict.SNothing
+        TxOut addr' (Value inputValue _) _ = snd inputPair
+        change = TxOut addr' (valueFromList (fromIntegral $ fromIntegral inputValue - amount - fees) []) Strict.SNothing
+    Right $ mkSimpleTx $ consPaymentTx input (StrictSeq.fromList [output, change]) (Coin fees)
 
 mkSimpleTx :: TxBody (AlonzoEra StandardCrypto) -> ValidatedTx (AlonzoEra StandardCrypto)
 mkSimpleTx txBody = ValidatedTx
@@ -95,5 +92,3 @@ emptyTx = ValidatedTx
     , isValid = IsValid True
     , auxiliaryData = maybeToStrictMaybe Nothing
     }
-
-

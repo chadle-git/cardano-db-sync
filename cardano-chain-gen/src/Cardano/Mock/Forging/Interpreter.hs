@@ -15,10 +15,10 @@ module Cardano.Mock.Forging.Interpreter
   , CardanoBlock
   , MockBlock (..)
   , NodeId (..)
-  , InterpreterError (..)
   , initInterpreter
   , forgeNext
   , withAlonzoLedgerState
+  , withShelleyLedgerState
   ) where
 
 import           Control.Monad
@@ -35,7 +35,9 @@ import           NoThunks.Class (OnlyCheckWhnfNamed (..))
 
 import           Ouroboros.Consensus.Block hiding (blockMatchesHeader)
 import qualified Ouroboros.Consensus.Block as Block
-import           Ouroboros.Consensus.Cardano.Block (CardanoEras, HardForkBlock, StandardCrypto, AlonzoEra, LedgerState(LedgerStateAlonzo))
+import           Ouroboros.Consensus.Cardano.Block (AlonzoEra, LedgerState(LedgerStateAlonzo, LedgerStateShelley),
+                   ShelleyEra, StandardCrypto)
+import           Ouroboros.Consensus.Cardano.Node ()
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.Forecast
 import qualified Ouroboros.Consensus.HardFork.Combinator.AcrossEras as Consensus
@@ -53,23 +55,10 @@ import qualified Ouroboros.Consensus.TypeFamilyWrappers as Consensus
 import           Ouroboros.Consensus.Util.IOLike
 import           Ouroboros.Consensus.Util.Orphans ()
 
-import           Ouroboros.Consensus.Cardano.Node ()
-
-import           Cardano.Ledger.Alonzo.Tx
 import qualified Cardano.Ledger.Shelley.API.Mempool as SL
 
 import           Cardano.Mock.ChainDB
-
-type CardanoBlock = HardForkBlock (CardanoEras StandardCrypto)
-
--- | This module translated 'MockBlock' into CardanoBlock
-data MockBlock = MockBlock
-  { txs :: [ValidatedTx (AlonzoEra StandardCrypto)]
-  , node :: NodeId
-  }
-
-newtype NodeId = NodeId { unNodeId :: Int }
-  deriving Show
+import           Cardano.Mock.Forging.Types
 
 data Interpreter = Interpreter
   { iForging :: Map Int (BlockForging IO CardanoBlock)
@@ -125,7 +114,6 @@ forgeNext interpreter testBlock = do
         blk <- tryConsecutiveSlots interState forging 0 (isSlot interState)
         let !chain' = extendChainDB (isChain interState) blk
         let !newSt = currentState chain'
-        print newSt
         let newInterState = InterpreterState
               { isChain = chain'
               , isForecast = mkForecast cfg newSt
@@ -229,20 +217,40 @@ getState inter = do
     pure $ currentState $ isChain interState
 
 withAlonzoLedgerState :: Interpreter
-                      -> (LedgerState (ShelleyBlock (AlonzoEra StandardCrypto)) -> a)
+                      -> (LedgerState (ShelleyBlock (AlonzoEra StandardCrypto)) -> Either ForgingError a)
                       -> IO a
 withAlonzoLedgerState inter mk = do
     st <- getState inter
     case ledgerState st of
-      LedgerStateAlonzo sta -> pure $ mk sta
-      _ -> error "Expected Alonzo era state"
+      LedgerStateAlonzo sta -> case mk sta of
+        Right a -> pure a
+        Left err -> throwIO err
+      _ -> throwIO ExpectedAlonzoState
 
-mkValidated :: ValidatedTx (AlonzoEra StandardCrypto)
-            -> Validated (Consensus.GenTx CardanoBlock)
-mkValidated tx =
+withShelleyLedgerState :: Interpreter
+                       -> (LedgerState (ShelleyBlock (ShelleyEra StandardCrypto)) -> Either ForgingError a)
+                       -> IO a
+withShelleyLedgerState inter mk = do
+    st <- getState inter
+    case ledgerState st of
+      LedgerStateShelley sts -> case mk sts of
+        Right a -> pure a
+        Left err -> throwIO err
+      _ -> throwIO ExpectedShelleyState
+
+mkValidated :: TxEra -> Validated (Consensus.GenTx CardanoBlock)
+mkValidated (TxAlonzo tx) =
     Consensus.HardForkValidatedGenTx
       (Consensus.OneEraValidatedGenTx
         (S (S (S (S (Z (Consensus.WrapValidatedGenTx tx')))))))
+  where
+    tx' = Consensus.mkShelleyValidatedTx $
+            SL.unsafeMakeValidated tx
+
+mkValidated (TxShelley tx) =
+    Consensus.HardForkValidatedGenTx
+      (Consensus.OneEraValidatedGenTx
+        (S (Z (Consensus.WrapValidatedGenTx tx'))))
   where
     tx' = Consensus.mkShelleyValidatedTx $
             SL.unsafeMakeValidated tx
@@ -254,12 +262,6 @@ mkForecast cfg st =
     ledgerViewForecastAt
        (configLedger cfg)
        (ledgerState st)
-
-data InterpreterError =
-    WentTooFar
-  | ForecastError SlotNo OutsideForecastRange
-  | NonExistantNode NodeId
-  deriving (Show, Exception)
 
 textShow :: Show a => a -> Text
 textShow = Text.pack . show
